@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fatalities dataset assistant</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #17243b; background: #f3f5f8; }
+    body { max-width: 1000px; margin: auto; padding: 1.5rem; }
+    h1 { margin-bottom: .2rem; }
+    .notice, .panel, .answer { background: white; border: 1px solid #d5dce6; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    .notice { border-left: 4px solid #aa6315; }
+    label { display: block; font-weight: 600; margin: .7rem 0 .3rem; }
+    textarea, select, button { font: inherit; box-sizing: border-box; }
+    textarea, select { width: 100%; padding: .6rem; border: 1px solid #9faabc; border-radius: .3rem; }
+    button { background: #244e86; color: white; padding: .65rem 1rem; border: 0; border-radius: .3rem; cursor: pointer; margin-top: .7rem; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .muted { color: #536177; }
+    .error { color: #a32121; white-space: pre-wrap; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f5f8; padding: .8rem; }
+    .table-wrap { overflow: auto; max-height: 34rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+    th, td { border: 1px solid #d5dce6; padding: .5rem; text-align: left; vertical-align: top; min-width: 5rem; white-space: pre-wrap; }
+    th { background: #edf1f7; position: sticky; top: 0; }
+    td { max-width: 35rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Fatalities dataset assistant</h1>
+  <p class="muted">Local AI-assisted exploration &middot; <span id="info">Loading dataset details...</span></p>
+  <div class="notice">
+    <strong>Verification required.</strong> Results reproduce data from the supplied CSV, not independently verified facts.
+    AI can generate incorrect queries. Review the SQL and source records, including missing and uncertain values.
+    A record or classification does not establish a crime or legal responsibility. This is not legal advice.
+    AI inference runs locally. Do not enter privileged information unless the machine and local setup are appropriate.
+  </div>
+  <form id="form" class="panel">
+    <div id="modelStatus" class="muted" role="status">Checking local model...</div>
+    <label for="question">Ask about the dataset</label>
+    <textarea id="question" rows="3" maxlength="4000" required placeholder="For example: How many records are there by year and citizenship?"></textarea>
+    <button id="submit" type="submit">Ask</button>
+    <button id="clear" type="button">Clear conversation</button>
+    <p class="muted">Examples: Count records by year and citizenship. Show records of people under 18 in 2022. How many records have unknown or missing participation?</p>
+  </form>
+  <div id="status" role="status" class="error"></div>
+  <section id="answers" aria-live="polite"></section>
+  <script>
+    const form = document.getElementById('form');
+    const question = document.getElementById('question');
+    const status = document.getElementById('status');
+    const submit = document.getElementById('submit');
+    const answers = document.getElementById('answers');
+    let history = [];
+    let generation = 0;
+
+    async function getJson(url, options) {
+      const response = await fetch(url, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    }
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+    getJson('/api/info').then(data => {
+      document.getElementById('info').textContent = `${data.records.toLocaleString()} records · CSV SHA-256 ${data.sha256}`;
+      const modelStatus = document.getElementById('modelStatus');
+      modelStatus.textContent = data.modelAvailable ? `Local model: ${data.model}` : `Model file not found: ${data.model}. See README for setup.`;
+      if (!data.modelAvailable) modelStatus.className = 'error';
+    }).catch(error => { document.getElementById('info').textContent = `Dataset details unavailable: ${error.message}`; });
+    document.getElementById('clear').addEventListener('click', () => {
+      generation++;
+      history = [];
+      answers.replaceChildren();
+      status.textContent = '';
+    });
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const currentGeneration = generation;
+      const asked = question.value.trim();
+      submit.disabled = true;
+      status.className = 'muted';
+      status.textContent = 'Generating and running a query locally...';
+      try {
+        const data = await getJson('/api/ask', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: asked, history: history.slice(-4) })
+        });
+        if (currentGeneration !== generation) return;
+        const card = element('article', undefined, 'answer');
+        card.append(element('h2', asked), element('p', `AI interpretation (verify): ${data.message}`));
+        if (data.sql !== null) {
+          history.push({ question: asked, sql: data.sql });
+          card.append(element('h3', 'Generated SQL'), element('pre', data.sql));
+          card.append(element('h3', 'Query results'), element('p', data.truncated ?
+            'Showing the first 100 rows only; results are incomplete. Refine the question.' :
+            `${data.rows.length} result row(s). NULL means the CSV cell was empty.`));
+          if (data.rows.length) {
+            const wrap = element('div', undefined, 'table-wrap');
+            const table = element('table');
+            const head = element('thead');
+            const headings = element('tr');
+            for (const column of data.columns) headings.append(element('th', column));
+            head.append(headings);
+            const body = element('tbody');
+            for (const row of data.rows) {
+              const tr = element('tr');
+              for (const column of data.columns) tr.append(element('td', row[column] === null ? 'NULL' : String(row[column])));
+              body.append(tr);
+            }
+            table.append(head, body);
+            wrap.append(table);
+            card.append(wrap);
+          }
+          card.append(element('p', 'record_id identifies the CSV record number (header is record 1), not necessarily a physical line number.', 'muted'));
+        }
+        answers.prepend(card);
+        question.value = '';
+        status.textContent = '';
+      } catch (error) {
+        if (currentGeneration === generation) {
+          status.className = 'error';
+          status.textContent = `Unable to answer: ${error.message}`;
+        }
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
